@@ -28,9 +28,14 @@ using AsyncClient = AsyncClientClass;
 AsyncClient aClient(ssl_client);
 RealtimeDatabase Database;
 
-//variaveis de tempo para envio de dados a cada 10 segundos
-unsigned long lastSendTime = 0;
-const unsigned long sendInterval = 10000;
+//variaveis de tempo para envio de dados do monitoramento contínuo
+unsigned long lastMonitorSendTime = 0;
+unsigned long intervaloMonitoramentoMs = 10000;  //10s padrao, mas pode ser configurado e sobrescrito pelo site
+
+//ciclo rapido, independente do intervalo de monitoramento
+unsigned long lastCicloRapido = 0;
+const unsigned long cicloRapidoMs = 3000;
+
 int intValue = 0;
 float floatValue = 0.01;
 String stringValue = "";
@@ -143,35 +148,45 @@ void loop() {
 
   if (app.ready()) {
 
-    // envio peridico de dados a cada 10 segundos
-    unsigned long currentTime = millis();
-    if (currentTime - lastSendTime >= sendInterval) {
+    unsigned long agoraMs = millis();
+
+    if (agoraMs - lastCicloRapido >= cicloRapidoMs) {
       // atualiza o horario
-      lastSendTime = currentTime;
-      
-      //consulta o comando de conectar/desconectar vindo do site (roda primeiro, sincrono, pra nao disputar com os envios)
-      String comando = Database.get<String>(aClient, "/sensores/dispositivo-001/controle/ativo");
-      comando.trim();             //remove espacos/quebras de linha nas pontas
-      comando.replace("\"", "");  //remove aspas, caso o valor venha entre aspas
-
-      Serial.print("comando recebido: [");
-      Serial.print(comando);
-      Serial.println("]");
-
-      if (comando == "true") dispositivoAtivo = true;
-      if (comando == "false") dispositivoAtivo = false;
+      lastCicloRapido = agoraMs;
 
       time_t hora = time(nullptr);
       struct tm info;
       bool horaValida = getLocalTime(&info);
 
-      if (dispositivoAtivo) {
-        Database.set<int>(aClient, "/sensores/dispositivo-001/SensorTDS/valor", (int)tdsValue, processData, "RTDB_Send_String");
-        if (getLocalTime(&info)) {
+      //consulta o comando de conectar/desconectar vindo do site
+      String comandoAtivo = Database.get<String>(aClient, "/sensores/dispositivo-001/controle/ativo");
+      comandoAtivo.trim();             //remove espacos/quebras de linha nas pontas
+      comandoAtivo.replace("\"", "");  //remove aspas, caso o valor venha entre aspas
+      if (comandoAtivo == "true") dispositivoAtivo = true;
+      if (comandoAtivo == "false") dispositivoAtivo = false;
+
+      //busca o intervalo de monitoramento configurado no site
+      String intervaloTexto = Database.get<String>(aClient, "/sensores/dispositivo-001/controle/intervaloMonitoramento");
+      intervaloTexto.trim();
+      intervaloTexto.replace("\"", "");
+      int segundosIntervalo = intervaloTexto.toInt();
+      if (segundosIntervalo > 0) intervaloMonitoramentoMs = (unsigned long)segundosIntervalo * 1000UL;
+
+      //consulta se o site pediu uma leitura imediata, independente do intervalo de monitoramento
+      String comando = Database.get<String>(aClient, "/sensores/dispositivo-001/controle/comando");
+      comando.trim();
+      comando.replace("\"", "");
+
+      if (comando == "imediata") {
+        //executa na hora
+        if (horaValida) {
           char horaTexto[20];
           strftime(horaTexto, sizeof(horaTexto), "%d/%m/%Y %H:%M:%S", &info);
+          Database.set<int>(aClient, "/sensores/dispositivo-001/SensorTDS/valor", (int)tdsValue, processData, "RTDB_Send_String");
           Database.set<String>(aClient, "/sensores/dispositivo-001/SensorTDS/hora", String(horaTexto), processData, "RTDB_Send_Hora");
         }
+        //consome o comando, pra nao repetir no proximo ciclo
+        Database.set<String>(aClient, "/sensores/dispositivo-001/controle/comando", "nenhum", processData, "RTDB_Send_Comando");
       }
 
       //sinal de vida que continua sendo enviado mesmo pausado, para o site distinguir "pausado" de "offline"
@@ -179,6 +194,19 @@ void loop() {
         char horaVida[20];
         strftime(horaVida, sizeof(horaVida), "%d/%m/%Y %H:%M:%S", &info);
         Database.set<String>(aClient, "/sensores/dispositivo-001/ultimoContato", String(horaVida), processData, "RTDB_Send_Contato");
+      }
+    }
+
+    //envio periodico do monitoramento continuo, no intervalo definido pelo usuario na tela de configuracoes
+    if (dispositivoAtivo && agoraMs - lastMonitorSendTime >= intervaloMonitoramentoMs) {
+      lastMonitorSendTime = agoraMs;
+
+      struct tm info;
+      if (getLocalTime(&info)) {
+        char horaTexto[20];
+        strftime(horaTexto, sizeof(horaTexto), "%d/%m/%Y %H:%M:%S", &info);
+        Database.set<int>(aClient, "/sensores/dispositivo-001/SensorTDS/valor", (int)tdsValue, processData, "RTDB_Send_String");
+        Database.set<String>(aClient, "/sensores/dispositivo-001/SensorTDS/hora", String(horaTexto), processData, "RTDB_Send_Hora");
       }
     }
   }
