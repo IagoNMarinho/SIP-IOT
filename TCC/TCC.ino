@@ -10,8 +10,8 @@
 #include <DallasTemperature.h>
 
 //credenciais
-#define WIFI_SSID ".."
-#define WIFI_PASSWORD ".."
+#define WIFI_SSID "Caroline"
+#define WIFI_PASSWORD "1356903030"
 
 #define Web_API_KEY "AIzaSyBkQnjqpGgCBWi1RKoJ_-ngsqIah8nUDn4"    //chave de api do projeto firebase
 #define DATABASE_URL "https://projet0sip-default-rtdb.firebaseio.com/"   //url do banco de dados
@@ -92,6 +92,32 @@ int getMedianNum(int bArray[], int iFilterLen) {
   return bTemp;
 }
 
+// ---------------- SENSOR TURBIDEZ ----------------
+#define TurbSensorPin 6
+
+const int N_PONTOS = 3;
+float tabelaV[N_PONTOS]   = {1.0, 0.67, 0.36};
+float tabelaNTU[N_PONTOS] = {0, 200, 3000};
+
+float tensaoTurbidez = 0;
+float ntuValue = 0;
+
+long turbSoma = 0;
+float turbContagem = 0;
+
+float tensaoParaNTU(float v) {
+  if (v >= tabelaV[0]) return tabelaNTU[0];
+  if (v <= tabelaV[N_PONTOS - 1]) return tabelaNTU[N_PONTOS - 1];
+
+  for (int i = 0; i < N_PONTOS - 1; i++) {
+    if (v <= tabelaV[i] && v >= tabelaV[i + 1]) {
+      float frac = (tabelaV[i] - v) / (tabelaV[i] - tabelaV[i + 1]);
+      return tabelaNTU[i] + frac * (tabelaNTU[i + 1] - tabelaNTU[i]);
+    }
+  }
+  return tabelaNTU[N_PONTOS - 1];
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -127,13 +153,16 @@ void setup() {
   pinMode(TdsSensorPin, INPUT);
   analogReadResolution(12);                         //ADC de 12 bits (0 a 4095)
   analogSetPinAttenuation(TdsSensorPin, ADC_11db);  //faixa de leitura até ~3,1 V
+
+  //turbidez
+  analogSetPinAttenuation(TurbSensorPin, ADC_11db);
 }
 
 void loop() {
 
   app.loop();
 
-  //novas leituras de TDS a cada 40 ms, salvas no buffer (ADC bruto, como no codigo 1)
+  //novas leituras de TDS a cada 40 ms, salvas no buffer
   static unsigned long analogSampleTimepoint = millis();
   if (millis() - analogSampleTimepoint > 40U) {
     analogSampleTimepoint = millis();
@@ -141,6 +170,21 @@ void loop() {
     analogBufferIndex++;
     if (analogBufferIndex == SCOUNT) {
       analogBufferIndex = 0;
+    }
+  }
+
+   static unsigned long turbSampleTimepoint = millis();
+  if (millis() - turbSampleTimepoint >= 5U) {
+    turbSampleTimepoint = millis();
+    turbSoma += analogReadMilliVolts(TurbSensorPin);
+    turbContagem++;
+
+    if (turbContagem == 20) {
+      float leitura = turbSoma / 20.0;
+      tensaoTurbidez = leitura / 1000.0;
+      ntuValue = tensaoParaNTU(tensaoTurbidez);
+      turbSoma = 0;
+      turbContagem = 0;
     }
   }
 
@@ -166,7 +210,7 @@ void loop() {
       analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
     }
 
-    //valor mais estavel pela mediana, convertido para voltagem (igual ao codigo 1)
+    //valor mais estavel pela mediana, convertido para voltagem
     averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF / 4096.0;
 
     //compensacao de temperatura
@@ -179,8 +223,9 @@ void loop() {
     if (tdsValue < 0) tdsValue = 0;
 
     //monitor serial para depuracao
-    Serial.printf("Temp: %.2f C (%s) | Tensao: %.3f V | TDS: %.2f ppm\n",
-                  temperature, temperaturaValida ? "ok" : "padrao 25", averageVoltage, tdsValue);
+    Serial.printf("Temp: %.2f C (%s) | Tensao: %.3f V | TDS: %.2f ppm | Turb: %.2f V | NTU: %.0f\n",
+                  temperature, temperaturaValida ? "ok" : "padrao 25", averageVoltage, tdsValue,
+                  tensaoTurbidez, ntuValue);
   }
 
   if (app.ready()) {
@@ -232,16 +277,17 @@ void loop() {
   }
 }
 
-//envia TDS, temperatura e hora juntos, numa unica gravacao
+//envia TDS, temperatura, turbidez e hora juntos, numa unica gravacao
 void enviarColeta(String horaTexto) {
-  object_t coleta, objTDS, objTemp, objHora;
+  object_t coleta, objTDS, objTemp, objTurb, objHora;
   JsonWriter writer;
 
   writer.create(objTDS, "SensorTDS", number_t(tdsValue, 2));
   writer.create(objTemp, "SensorTemp", number_t(temperature, 2));
+  writer.create(objTurb, "SensorTurbidez", number_t(ntuValue, 0));
   writer.create(objHora, "hora", string_t(horaTexto));
 
-  writer.join(coleta, 3, objTDS, objTemp, objHora);
+  writer.join(coleta, 4, objTDS, objTemp, objTurb, objHora);
 
   Database.set<object_t>(aClient, "/sensores/dispositivo-001/Coleta", coleta, processData, "RTDB_Send_Coleta");
 }
